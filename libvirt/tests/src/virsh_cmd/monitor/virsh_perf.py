@@ -105,7 +105,8 @@ def run(test, params, env):
                 test.fail("Run successfully with wrong command!")
         else:
             if status:
-                if "unable to enable host cpu" in result.stderr.lower():
+                if ("unable to enable/disable perf events" in
+                   result.stderr.lower()):
                     test.cancel("Some of the events is not supported")
                 else:
                     test.fail("Run failed with right command")
