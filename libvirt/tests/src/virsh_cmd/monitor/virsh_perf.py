@@ -86,14 +86,14 @@ def run(test, params, env):
 
         # To test disable action, enable the events first
         if perf_option == '--disable':
-            result = virsh.perf(vm_name, "--enable" + events,
+            result = virsh.perf(vm_name, "--enable", events, "",
                                 ignore_status=True, debug=True)
             status = result.exit_status
             # output = result.stdout.strip()
             if status_error:
                 test.fail("Failed to enable the events before disable them!")
 
-        result = virsh.perf(vm_name, perf_option + events + virsh_opt,
+        result = virsh.perf(vm_name, perf_option, events, virsh_opt,
                             ignore_status=True, debug=True)
         status = result.exit_status
         # output = result.stdout.strip()
