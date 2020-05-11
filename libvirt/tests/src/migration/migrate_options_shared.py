@@ -28,6 +28,7 @@ from virttest import utils_package
 from virttest import utils_iptables
 from virttest import utils_conn
 from virttest import xml_utils
+from virttest import migration
 
 from virttest.utils_iptables import Iptables
 from virttest.libvirt_xml import vm_xml
@@ -160,6 +161,20 @@ def run(test, params, env):
             logging.debug("New device is added:\n%s", newcontroller)
             vm_xml.add_device(newcontroller)
         vm_xml.sync()
+
+    def add_tpm(vm, tpm_args):
+        """
+        Add tpm device to vm
+
+        :param vm: The guest
+        :param tpm_args: Parameters for tpm device
+        """
+        vmxml = vm_xml.VMXML.new_from_inactive_dumpxml(vm.name)
+        vmxml.remove_all_device_by_type('tpm')
+        tpm_dev = libvirt.create_tpm_dev(tpm_args)
+        logging.debug("tpm xml is %s", tpm_dev)
+        vmxml.add_device(tpm_dev)
+        vmxml.sync()
 
     def do_migration(vm, dest_uri, options, extra):
         """
@@ -859,6 +874,25 @@ def run(test, params, env):
             if int(result.exit_status) != 0:
                 test.fail(result.stderr_text.strip())
 
+    def time_diff_between_vm_host(localvm=True):
+        """
+        check the time difference between vm and source host
+        :param localvm: True if vm is not migrated yet
+        """
+        if localvm:
+            vm_time = virsh.domtime(vm_name, debug=True).stdout
+            vm_time_value = int(vm_time.strip().split(":")[-1])
+        else:
+            remote_virsh_session = virsh.VirshPersistent(**remote_virsh_dargs)
+            vm_time = remote_virsh_session.domtime(vm_name, debug=True).stdout
+            vm_time_value = int(vm_time.strip().split(":")[-1])
+            remote_virsh_session.close_session()
+
+        host_time_value = int(time.time())
+        time_diff = host_time_value - vm_time_value
+        logging.debug("Time difference between source host and vm is %s", time_diff)
+        return time_diff
+
     check_parameters(test, params)
 
     # Params for NFS shared storage
@@ -908,6 +942,7 @@ def run(test, params, env):
     stress_in_vm = "yes" == params.get("stress_in_vm", "no")
     low_speed = params.get("low_speed", None)
     migr_vm_back = "yes" == params.get("migr_vm_back", "no")
+    timer_migration = "yes" == params.get("timer_migration")
 
     remote_virsh_dargs = {'remote_ip': server_ip, 'remote_user': server_user,
                           'remote_pwd': server_pwd, 'unprivileged_user': None,
@@ -919,7 +954,10 @@ def run(test, params, env):
     vcpu_num = params.get("vcpu_num")
     block_time = params.get("block_time", 30)
     parallel_cn_nums = params.get("parallel_cn_nums")
-
+    tpm_args = eval(params.get("tpm_args", '{}'))
+    src_secret_value = params.get("src_secret_value")
+    dst_secret_value = params.get("dst_secret_value")
+    update_tpm_secret = "yes" == params.get("update_tpm_secret", "no")
     break_network_connection = "yes" == params.get("break_network_connection",
                                                    "no")
 
@@ -933,6 +971,7 @@ def run(test, params, env):
     cmd_run_in_remote_host = params.get("cmd_run_in_remote_host", None)
     cmd_run_in_remote_host_1 = params.get("cmd_run_in_remote_host_1", None)
     cmd_run_in_remote_host_2 = params.get("cmd_run_in_remote_host_2", None)
+    cmd_in_vm_after_migration = params.get("cmd_in_vm_after_migration")
 
     # For qemu command line checking
     qemu_check = params.get("qemu_check", None)
@@ -974,6 +1013,9 @@ def run(test, params, env):
     tls_obj = None
 
     expConnNum = 0
+    tpm_sec_uuid = None
+    dest_tmp_sec_uuid = None
+
     # Local variables
     vm_name = params.get("migrate_main_vm")
     vm = env.get_vm(vm_name)
@@ -994,7 +1036,11 @@ def run(test, params, env):
             if not libvirt_version.version_compare(5, 6, 0):
                 test.cancel("This libvirt version doesn't support "
                             "tls-destination option.")
-
+        # only emulator backend type in migration for now
+        if tpm_args and tpm_args.get("backend_type") == "emulator":
+            if not utils_misc.compare_qemu_version(4, 0, 0, is_rhev=False):
+                test.cancel("This qemu version doesn't support "
+                            "vtpm emulator backend.")
         if vcpu_num:
             cmd = "grep -c processor /proc/cpuinfo"
             remote_session = remote.remote_login("ssh", server_ip, "22",
@@ -1092,6 +1138,48 @@ def run(test, params, env):
         if remove_cache:
             params["enable_cache"] = "no"
 
+        if tpm_args:
+            if update_tpm_secret:
+                auth_sec_dict = {"sec_ephemeral": "no",
+                                 "sec_private": "yes",
+                                 "sec_desc": "sample vTPM secret",
+                                 "sec_usage": "vtpm",
+                                 "sec_name": "VTPM_example"}
+                tpm_sec_uuid = libvirt.create_secret(auth_sec_dict)
+                logging.debug("tpm sec uuid on source: %s", tpm_sec_uuid)
+                tpm_args.update({"encryption_secret": tpm_sec_uuid})
+                add_tpm(vm, tpm_args)
+                if src_secret_value:
+                    virsh.secret_set_value(tpm_sec_uuid, src_secret_value,
+                                           encode=True, debug=True)
+
+                logging.debug("create secret on target")
+                auth_sec_dict.update({"sec_uuid": tpm_sec_uuid})
+                dest_tmp_sec_uuid = libvirt.create_secret(auth_sec_dict,
+                                                          remote_virsh_dargs)
+                logging.debug("tpm sec uuid on target: %s", dest_tmp_sec_uuid)
+                if dst_secret_value:
+                    if not remote_virsh_session:
+                        remote_virsh_session = virsh.VirshPersistent(**remote_virsh_dargs)
+
+                    remote_virsh_session.secret_set_value(dest_tmp_sec_uuid,
+                                                          dst_secret_value,
+                                                          encode=True,
+                                                          debug=True)
+                    remote_virsh_session.close_session()
+
+            remote_session = remote.remote_login("ssh", server_ip, "22",
+                                                 server_user, server_pwd,
+                                                 r'[$#%]')
+            for loc in ['source', 'target']:
+                session = None
+                if loc == 'target':
+                    session = remote_session
+                if not utils_package.package_install(["swtpm", "swtpm-tools"], session):
+                    test.error("Failed to install swtpm packages on {} host."
+                               .format(loc))
+            remote_session.close()
+
         # Change the disk of the vm to shared disk and then start VM
         libvirt.set_vm_disk(vm, params)
 
@@ -1130,6 +1218,10 @@ def run(test, params, env):
         if hpt_resize and hpt_resize != 'disabled':
             trigger_hpt_resize(vm_session)
 
+        if tpm_args:
+            if not utils_package.package_install("tpm2-tools", vm_session):
+                test.error("Failed to install tpm2-tools in vm")
+
         if stress_in_vm:
             pkg_name = 'stress'
             logging.debug("Check if stress tool is installed")
@@ -1142,6 +1234,9 @@ def run(test, params, env):
             stress_thread = threading.Thread(target=run_stress_in_vm,
                                              args=())
             stress_thread.start()
+
+        if timer_migration:
+            source_vm_host_time_diff = time_diff_between_vm_host(localvm=True)
 
         if extra.count("timeout-postcopy"):
             func_name = check_timeout_postcopy
@@ -1186,7 +1281,7 @@ def run(test, params, env):
         if not asynch_migration:
             mig_result = do_migration(vm, dest_uri, options, extra)
         else:
-            migration_test = libvirt.MigrationTest()
+            migration_test = migration.MigrationTest()
 
             logging.debug("vm.connect_uri=%s", vm.connect_uri)
             vms = [vm]
@@ -1331,7 +1426,19 @@ def run(test, params, env):
                                                    r"[\#\$]\s*$")
             check_vm_network_accessed(server_session)
             server_session.close()
-        # Execute migration from remote
+
+            if cmd_in_vm_after_migration:
+                vm_after_mig = utils_test.RemoteVMManager(cmd_parms)
+                vm_after_mig.setup_ssh_auth(vm.get_address(),
+                                            params.get("password"),
+                                            timeout=60)
+                cmd_result = vm_after_mig.run_command(vm.get_address(),
+                                                      cmd_in_vm_after_migration)
+                logging.debug("cmd_result is %s", cmd_result)
+                if cmd_result.exit_status:
+                    test.fail("Failed to run '{}' in vm. Result: {}"
+                              .format(cmd_in_vm_after_migration, cmd_result))
+
         if migr_vm_back:
             ssh_connection = utils_conn.SSHConnection(server_ip=client_ip,
                                                       server_pwd=client_pwd,
@@ -1343,7 +1450,7 @@ def run(test, params, env):
                 ssh_connection.conn_setup()
                 ssh_connection.conn_check()
 
-            migrate_setup = libvirt.MigrationTest()
+            migrate_setup = migration.MigrationTest()
             # Pre migration setup for local machine
             src_full_uri = libvirt_vm.complete_uri(
                         params.get("migrate_source_host"))
@@ -1360,6 +1467,11 @@ def run(test, params, env):
                 test.fail("Failed to run '%s' on remote: %s"
                           % (cmd, cmd_result))
 
+        if timer_migration:
+            target_vm_host_time_diff = time_diff_between_vm_host(localvm=False)
+            if abs(target_vm_host_time_diff - source_vm_host_time_diff) > 1:
+                test.fail("The difference of target_vm_host_time_diff and source_vm_host_time_diff"
+                          "should not more than 1 second")
     except exceptions.TestFail as details:
         is_TestFail = True
         test_exception = details
@@ -1396,6 +1508,15 @@ def run(test, params, env):
             orig_config_xml.sync()
             logging.debug("The current VM XML:\n%s", orig_config_xml.xmltreefile)
 
+            # cleanup secret uuid
+            if tpm_sec_uuid:
+                virsh.secret_undefine(tpm_sec_uuid, debug=True,
+                                      ignore_status=True)
+
+            if dest_tmp_sec_uuid:
+                cmd = "virsh secret-undefine %s" % dest_tmp_sec_uuid
+                remote.run_remote_cmd(cmd, params, runner_on_target)
+
             if remote_virsh_session:
                 remote_virsh_session.close_session()
 
@@ -1406,7 +1527,7 @@ def run(test, params, env):
             if migr_vm_back:
                 if 'ssh_connection' in locals():
                     ssh_connection.auto_recover = True
-                migrate_setup = libvirt.MigrationTest()
+                migrate_setup = migration.MigrationTest()
                 if 'src_full_uri' in locals():
                     migrate_setup.migrate_pre_setup(src_full_uri, params,
                                                     cleanup=True)

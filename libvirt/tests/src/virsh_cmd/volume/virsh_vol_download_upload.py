@@ -111,7 +111,7 @@ def create_disk(disk_type, disk_path, disk_format, disk_device_type,
     return custom_disk
 
 
-def write_disk(test, guest_vm, target_name, size=100):
+def write_disk(test, guest_vm, target_name, size=200):
     """
     Write data into disk in VM discard value.
 
@@ -223,7 +223,8 @@ def run(test, params, env):
             else:
                 pvt.pre_vol(vol_name, frmt, capacity, allocation, pool_name)
 
-        vol_list = virsh.vol_list(pool_name).stdout.strip()
+        virsh.pool_refresh(pool_name, debug=True)
+        vol_list = virsh.vol_list(pool_name, debug=True).stdout.strip()
         # iscsi volume name is different from others
         if pool_type == "iscsi":
             vol_name = vol_list.split('\n')[2].split()[0]
