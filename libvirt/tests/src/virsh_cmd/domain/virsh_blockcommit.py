@@ -354,13 +354,13 @@ def run(test, params, env):
             vmxml.del_device(disk_xml)
             disk_dict = {'attrs': {'file': snap_top}}
             disk_xml.source = disk_xml.new_disk_source(**disk_dict)
-            bs_source = {'file': blk_source}
-            bs_dict = {"type": params.get("disk_type", "file"),
-                       "format": {'type': params.get("disk_format", "qcow2")}}
-
-            new_bs = disk_xml.new_backingstore(**bs_dict)
-            new_bs["source"] = disk_xml.backingstore.new_source(**bs_source)
-            disk_xml.backingstore = new_bs
+            if libvirt_version.version_compare(6, 0, 0):
+                bs_source = {'file': blk_source}
+                bs_dict = {"type": params.get("disk_type", "file"),
+                           "format": {'type': params.get("disk_format", "qcow2")}}
+                new_bs = disk_xml.new_backingstore(**bs_dict)
+                new_bs["source"] = disk_xml.backingstore.new_source(**bs_source)
+                disk_xml.backingstore = new_bs
             vmxml.add_device(disk_xml)
             vmxml.sync()
             vm.start()
@@ -470,19 +470,20 @@ def run(test, params, env):
 
                 block_commit_index = snapshot_take - 1
                 expect_backing_file = True
-            # Do block commit with --wait if top_inactive
             for count in range(1, block_commit_index):
-                blockcommit_options = ("  --wait --verbose --top vda[%d] "
-                                       "--base vda[%d] --keep-relative"
-                                       % (top_index, top_index+1))
+                # Do block commit with --wait if top_inactive
+                if top_inactive:
+                    blockcommit_options = ("  --wait --verbose --top vda[%d] "
+                                           "--base vda[%d] --keep-relative"
+                                           % (top_index, top_index+1))
+                    if not libvirt_version.version_compare(6, 0, 0):
+                        top_index = 1
+                    else:
+                        top_index += 1
                 res = virsh.blockcommit(vm_name, blk_target,
                                         blockcommit_options, **virsh_dargs)
                 libvirt.check_exit_status(res, status_error)
 
-                if not libvirt_version.version_compare(6, 0, 0):
-                    top_index = 1
-                else:
-                    top_index += 1
             check_chain_backing_files(blk_source_image, expect_backing_file)
             return
 
