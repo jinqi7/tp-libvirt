@@ -6,6 +6,8 @@ from virttest import defaults
 from virttest import migration
 from virttest import libvirt_version
 from virttest import virsh
+from virttest import utils_conn
+from virttest import remote
 
 from virttest.libvirt_xml import vm_xml
 from virttest.utils_test import libvirt
@@ -28,6 +30,39 @@ def run(test, params, env):
         """
         pass
 
+    def check_memballoon(vm):
+
+        # Get original memory for later balloon function check
+        ori_outside_mem = vm.get_max_mem()
+        ori_guest_mem = vm.get_current_memory_size()
+        # balloon half of the memory
+        ballooned_mem = ori_outside_mem // 2
+        # Set memory to test balloon function
+        virsh.setmem(vm_name, ballooned_mem)
+        # Check if memory is ballooned successfully
+        logging.info("Check memory status")
+        unusable_mem = ori_outside_mem - ori_guest_mem
+        gcompare_threshold = int(
+            params.get("guest_compare_threshold", unusable_mem))
+        after_mem = vm.get_current_memory_size()
+        act_threshold = ballooned_mem - after_mem
+        if (after_mem > ballooned_mem) or (
+                abs(act_threshold) > gcompare_threshold):
+            test.fail("Balloon test failed")
+
+    migr_vm_back = "yes" == params.get("migr_vm_back", "no")
+    remote_ip = params.get("remote_ip")
+    remote_user = params.get("remote_user")
+    remote_pwd = params.get("remote_pwd")
+    local_ip = params.get("local_ip")
+    local_pwd = params.get("local_pwd")
+    virsh_opt = params.get("virsh_opt", "--live")
+    ballooned_mem = params.get("ballooned_mem")
+    check = params.get("check")
+    remote_virsh_dargs = {'remote_ip': remote_ip, 'remote_user': remote_user,
+                          'remote_pwd': remote_pwd, 'unprivileged_user': None,
+                          'ssh_remote_auth': True}
+
     migration_test = migration.MigrationTest()
     migration_test.check_parameters(params)
 
@@ -46,7 +81,7 @@ def run(test, params, env):
     params["mnt_path_name"] = params.get("nfs_mount_dir")
 
     # Local variables
-#    virsh_args = {"debug": True}
+    virsh_args = {"debug": True}
     virsh_options = params.get("virsh_options", "")
     options = params.get("virsh_migrate_options", "--live --verbose")
     func_params_exists = "yes" == params.get("func_params_exists", "yes")
@@ -81,13 +116,13 @@ def run(test, params, env):
     orig_config_xml = new_xml.copy()
 
     try:
-        # Change the disk of the vm
-        libvirt.set_vm_disk(vm, params)
-
         # Update memory balloon device to correct model
         membal_dict = {'membal_model': 'virtio',
                        'membal_stats_period': '10'}
         libvirt.update_memballoon_xml(new_xml, membal_dict)
+
+        # Change the disk of the vm
+        libvirt.set_vm_disk(vm, params)
 
         # Update libvirtd configuration
         if libvirtd_conf_dict:
@@ -124,24 +159,50 @@ def run(test, params, env):
         if check_str_local_log:
             libvirt.check_logfile(check_str_local_log, log_file)
 
-        # Get original memory for later balloon function check
-        ori_outside_mem = vm.get_max_mem()
-        ori_guest_mem = vm.get_current_memory_size()
-        # balloon half of the memory
-        ballooned_mem = ori_outside_mem // 2
-        # Set memory to test balloon function
-        virsh.setmem(vm_name, ballooned_mem)
-        # Check if memory is ballooned successfully
-        logging.info("Check memory status")
-        unusable_mem = ori_outside_mem - ori_guest_mem
-        gcompare_threshold = int(
-            params.get("guest_compare_threshold", unusable_mem))
-        after_mem = vm.get_current_memory_size()
-        act_threshold = ballooned_mem - after_mem
-        if (after_mem > ballooned_mem) or (
-                abs(act_threshold) > gcompare_threshold):
-            test.fail("Balloon test failed")
+        if check == "mem_balloon":
+            remote_virsh_session = virsh.VirshPersistent(**remote_virsh_dargs)
+            remote_virsh_session.setmem(vm_name, ballooned_mem, None, None,
+                                        False, "", **virsh_args)
+            memstat_ouput = remote_virsh_session.dommemstat(vm_name, "",
+                                                            **virsh_args)
+            memstat_after = memstat_ouput.stdout
+            mem_after = memstat_after.splitlines()[0].split()[1]
+            remote_virsh_session.close_session()
+            if mem_after != ballooned_mem:
+                test.fail("memory is not ballooned to the expect size!")
 
+        # Create a remote runner for later use
+        runner_on_target = remote.RemoteRunner(host=remote_ip,
+                                               username=remote_user,
+                                               password=remote_pwd)
+
+        if migr_vm_back:
+            ssh_connection = utils_conn.SSHConnection(server_ip=remote_ip,
+                                                      server_pwd=remote_pwd,
+                                                      client_ip=local_ip,
+                                                      client_pwd=local_pwd)
+            try:
+                ssh_connection.conn_check()
+            except utils_conn.ConnectionError:
+                ssh_connection.conn_setup()
+                ssh_connection.conn_check()
+
+            # Pre migration setup for local machine
+            src_full_uri = libvirt_vm.complete_uri(
+                params.get("migrate_source_host"))
+
+            migration_test.migrate_pre_setup(src_full_uri, params)
+            cmd = "virsh migrate %s %s %s" % (vm_name,
+                                              virsh_opt, src_full_uri)
+            logging.debug("Start migration: %s", cmd)
+            cmd_result = remote.run_remote_cmd(cmd, params, runner_on_target)
+            logging.info(cmd_result)
+            if cmd_result.exit_status:
+                destroy_cmd = "virsh destroy %s" % vm_name
+                remote.run_remote_cmd(destroy_cmd, params, runner_on_target,
+                                      ignore_status=False)
+                test.fail("Failed to run '%s' on remote: %s"
+                          % (cmd, cmd_result))
     finally:
         logging.debug("Recover test environment")
         # Clean VM on destination and source
