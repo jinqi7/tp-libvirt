@@ -270,7 +270,11 @@ def run(test, params, env):
         if topology:
             vmcpuxml.topology = topology
         logging.debug(vmcpuxml.numa_cell)
-        vmcpuxml.numa_cell = numa_cell
+
+        for i in range(len(numa_cell)):
+            numacell_xml = libvirt_xml.vm_xml.VMCPUXML().Numa_CellXML()
+            numacell_xml.update(numa_cell[i])
+            vmcpuxml.set_numa_cell(numacell_xml)
         logging.debug(vmcpuxml.numa_cell)
         vmxml.cpu = vmcpuxml
 

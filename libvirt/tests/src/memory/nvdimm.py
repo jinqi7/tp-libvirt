@@ -74,6 +74,13 @@ def run(test, params, env):
             logging.debug('Set cpu params')
             setattr(cpu_xml, attr_key.replace('cpuxml_', ''),
                     eval(val) if ':' in val else val)
+
+        numa_cell = eval(params.get('numa_cell'))
+        for i in range(len(numa_cell)):
+            numacell_xml = vm_xml.VMCPUXML().Numa_CellXML()
+            numacell_xml.update(numa_cell[i])
+            cpu_xml.set_numa_cell(numacell_xml)
+
         logging.debug(cpu_xml)
         return cpu_xml.copy()
 
