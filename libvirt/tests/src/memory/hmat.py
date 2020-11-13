@@ -1,6 +1,7 @@
 import logging
 
 from virttest import virsh
+from virttest import libvirt_version
 from virttest.libvirt_xml import vm_xml
 from virttest.utils_libvirt import libvirt_cpu
 from virttest.utils_test import libvirt
@@ -19,6 +20,8 @@ def run(test, params, env):
     def check_numainfo_in_guest(check_list, content):
         """
         Check if numa information in guest is correct
+        :param check_list: list of string under checking
+        :param content: the whole output from the numactl cmd
         """
         content_str = ' '.join(content.split())
         logging.debug("content_str:%s" % content_str)
@@ -32,14 +35,15 @@ def run(test, params, env):
     def check_list_in_content(check_list, content):
         """
         Check if items in check_list are in content
+        :param check_list: list of string under checking
+        :param content: the whole content which may includes the strings
         """
         for item in check_list:
-            logging.debug("item:%s" % item)
             if item in content:
-                logging.info(item)
+                logging.info("item: %s" % item)
             else:
-                logging.error(item)
-                test.fail('Last item not in content')
+                logging.error("item: %s" % item)
+                test.fail('Last item not in content %s' % content)
 
     def create_cell_distances_xml():
         """
@@ -83,8 +87,8 @@ def run(test, params, env):
             cells.append(numacell_xml)
         cpu_xml.numa_cell = cells
 
-        latency_list = eval(params.get('latency'))
-        bandwidth_list = eval(params.get('bandwidth'))
+        latency_list = eval(params.get('latency', ''))
+        bandwidth_list = eval(params.get('bandwidth', ''))
         interconnects_xml = vm_xml.VMCPUXML().InterconnectsXML()
         interconnects_xml.latency = latency_list
         interconnects_xml.bandwidth = bandwidth_list
@@ -98,6 +102,9 @@ def run(test, params, env):
 
     chk_case = params.get('chk')
     try:
+        if not libvirt_version.version_compare(6, 6, 0):
+            test.cancel("Crrent libvirt version don't support the function")
+
         vm = env.get_vm(vm_name)
         vmxml = vm_xml.VMXML.new_from_inactive_dumpxml(vm_name)
 
